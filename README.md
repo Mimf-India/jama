@@ -48,7 +48,7 @@ Either way you get a single static binary, `jama` (2–3 MB, well under the
 ## 60-second tour
 
 ```console
-$ jama init ~/money
+$ jama init ~/money --commodity SAR
 $ jama add "Salary" 18000 --from income:salary --to assets:checking --date 2026-09-01
 $ jama import ~/Downloads/bank-sep.csv --rules rules/alrajhi.toml
    142 rows · 138 imported · 4 skipped (duplicates) · 6 unmatched
@@ -75,10 +75,19 @@ mistakes, `export` whenever you want a portable copy. Every data command
 takes `--json` for scripting — see [`docs/json.md`](docs/json.md) for the
 exact shapes.
 
+JAMA never assumes a currency: `--commodity` on `init` sets *this
+ledger's* default (used above so `add` doesn't need `--commodity` on
+every line — pick whatever your own ledger is actually in, there is
+nothing SAR-specific about the tool itself), and it's entirely optional.
+Without it, every `add`/`import` needs an explicit `--commodity`, or an
+account with a declared currency (`open ACCOUNT CODE` in the ledger
+file) to infer it from — otherwise JAMA errors out and tells you which of
+the three to use, rather than guessing.
+
 ## Command surface
 
 ```
-jama init [PATH]
+jama init [PATH] [--commodity CODE]
 jama add [NARRATION] [AMOUNT] [--from ACCT] [--to ACCT] [--date DATE] [--payee P] [--commodity CODE]
 jama edit <ID>
 jama rm <ID>

@@ -49,6 +49,14 @@ pub struct SourceConfig {
     pub payee: String,
     pub date_format: String,
     pub account: String,
+    /// This statement's commodity, e.g. `"SAR"` or `"USD"`. Optional: if
+    /// omitted, JAMA falls back to the source account's declared
+    /// currency, then the ledger's configured default — see
+    /// [`crate::ledger::Ledger::resolve_commodity`]. There is no
+    /// hardcoded fallback currency; an import with none of these will
+    /// fail with an actionable error rather than silently guessing.
+    #[serde(default)]
+    pub commodity: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -210,6 +218,7 @@ pub fn import(
     let rows = parse_csv_rows(csv_path, &rules.source)?;
     let source_account = Account::parse(&rules.source.account)
         .map_err(|e| JamaError::Import(format!("bad [source].account: {e}")))?;
+    let commodity = resolve_commodity(ledger, rules, &source_account)?;
 
     let mut outcome = ImportOutcome {
         total_rows: rows.len(),
@@ -245,7 +254,7 @@ pub fn import(
             }
             match rules.destination_for(row) {
                 Some(destination) => {
-                    insert_row_in_store(store, &source_account, destination, row)?;
+                    insert_row_in_store(store, &source_account, destination, &commodity, row)?;
                     imported += 1;
                 }
                 None => unmatched.push(row.clone()),
@@ -261,6 +270,19 @@ pub fn import(
     Ok(outcome)
 }
 
+/// Resolve the commodity for an entire import: an explicit
+/// `[source].commodity` in the rules file, else the source account's
+/// declared currency, else the ledger's configured default — see
+/// `Ledger::resolve_commodity`. A whole bank statement file is assumed to
+/// be in one commodity; there is no per-row override in v0.
+pub fn resolve_commodity(
+    ledger: &Ledger,
+    rules: &Rules,
+    source_account: &Account,
+) -> Result<String> {
+    ledger.resolve_commodity(rules.source.commodity.as_deref(), &[source_account])
+}
+
 /// Insert a single categorised row as a transaction and record its dedupe
 /// hash — used for rows the caller categorised interactively, one at a
 /// time, after `import()`'s bulk pass left them unmatched.
@@ -268,9 +290,10 @@ pub fn insert_row(
     ledger: &mut Ledger,
     source_account: &Account,
     destination: &str,
+    commodity: &str,
     row: &CsvRow,
 ) -> Result<i64> {
-    insert_row_in_store(&ledger.store, source_account, destination, row)
+    insert_row_in_store(&ledger.store, source_account, destination, commodity, row)
 }
 
 /// The actual insert, against a `Store` directly rather than a `Ledger` —
@@ -280,6 +303,7 @@ fn insert_row_in_store(
     store: &Store,
     source_account: &Account,
     destination: &str,
+    commodity: &str,
     row: &CsvRow,
 ) -> Result<i64> {
     let destination = Account::parse(destination).map_err(JamaError::Import)?;
@@ -287,7 +311,7 @@ fn insert_row_in_store(
     txn.flag = Flag::Cleared;
     txn.postings.push(Posting::new(
         source_account.clone(),
-        Amount::new(row.amount, "SAR"),
+        Amount::new(row.amount, commodity),
     ));
     txn.postings.push(Posting::elided(destination));
     let resolved = txn.resolve_postings().map_err(JamaError::Imbalance)?;

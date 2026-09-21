@@ -50,7 +50,15 @@ pub struct Cli {
 #[derive(Subcommand)]
 pub enum Commands {
     /// Create a new ledger directory.
-    Init { path: Option<PathBuf> },
+    Init {
+        path: Option<PathBuf>,
+        /// Default commodity for transactions that don't specify one and
+        /// whose accounts have no single declared currency. Optional —
+        /// leave unset to always require an explicit or declared
+        /// commodity.
+        #[arg(long)]
+        commodity: Option<String>,
+    },
     /// Add a transaction (interactively, or fully from flags).
     Add {
         narration: Option<String>,
@@ -61,8 +69,12 @@ pub enum Commands {
         to: Option<String>,
         #[arg(long)]
         date: Option<String>,
-        #[arg(long, default_value = "SAR")]
-        commodity: String,
+        /// Commodity for this transaction. If omitted, JAMA infers it
+        /// from the --from/--to accounts' declared currency, then this
+        /// ledger's default (set at `jama init --commodity`), and errors
+        /// out if neither resolves anything — never assumes one.
+        #[arg(long)]
+        commodity: Option<String>,
         #[arg(long)]
         payee: Option<String>,
     },

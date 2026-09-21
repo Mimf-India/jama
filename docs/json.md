@@ -53,8 +53,17 @@ transaction has no distinct payee (just a narration).
 ### `jama init --json`
 
 ```json
-{ "root": "/home/you/money", "db": ".../jama.db", "ledger": ".../jama.beancount", "rules_dir": ".../rules" }
+{
+  "root": "/home/you/money",
+  "db": ".../jama.db",
+  "ledger": ".../jama.beancount",
+  "rules_dir": ".../rules",
+  "default_commodity": "SAR"
+}
 ```
+
+`default_commodity` is `null` when `--commodity` wasn't passed to
+`init` — an unset default, not an assumed one.
 
 ### `jama add --json`
 

@@ -111,6 +111,24 @@ error. Each commodity has a declared display precision (`commodity`
 directive; defaults to 2 if undeclared) used when rendering, not when
 storing: internally JAMA keeps whatever precision you typed.
 
+## How JAMA picks a commodity for you
+
+The ledger text format itself never lets you omit a commodity — every
+amount is `NUMBER CODE`, always. But `jama add` and `jama import` let you
+skip typing it on every line, and there is no currency baked into the
+binary that gets used when you do: JAMA resolves it, in order, from:
+
+1. An explicit `--commodity CODE` on the command (or `[source].commodity`
+   in a CSV rules file — see below).
+2. Either account involved having exactly one currency declared for it
+   (an `open ACCOUNT CODE` directive somewhere in the ledger).
+3. This ledger's own configured default, set once with
+   `jama init --commodity CODE` (or left unset entirely).
+
+If none of those resolve anything, the command fails with an error naming
+all three options rather than guessing — a ledger with no default and no
+declared accounts always requires `--commodity` explicitly, by design.
+
 ## Multi-currency
 
 A single account can hold balances in more than one commodity — JAMA
@@ -139,6 +157,56 @@ inverse of: parsing that output and re-serializing it produces
 byte-identical text. This is exercised directly in
 `crates/jama-core/src/parser.rs`'s test suite, including on the
 multi-currency and Arabic-payee ledgers under `fixtures/`.
+
+## CSV import rules
+
+`jama import <file.csv> --rules <rules.toml>` maps a bank's CSV export to
+transactions using a small, human-editable TOML file:
+
+```toml
+[source]
+date = "Date"              # CSV column header holding the date
+amount = "Amount"          # CSV column header holding the amount
+payee = "Description"      # CSV column header holding the description
+date_format = "%d/%m/%Y"   # %Y/%y, %m, %d and literal separators
+account = "assets:checking"   # the JAMA account this statement is for
+commodity = "SAR"          # optional — see "How JAMA picks a commodity" above
+
+[[rule]]
+match = "payee ~ /uber|careem/i"
+to = "expenses:transport"
+
+[[rule]]
+match = "amount < 0 and payee ~ /rent/i"
+to = "expenses:rent"
+```
+
+Rules are tried in order; the first whose `match` expression is true
+wins. `match` is a tiny condition language, not a full expression
+language:
+
+- `field ~ /a|b|c/i` — a *lite* regex: only literal alternation, with an
+  optional trailing `i` for case-insensitivity. `field` can be `payee`
+  (or `narration`/`description`, synonyms for the same column) or any
+  raw CSV column name.
+- `field < N`, `>`, `<=`, `>=`, `==`, `!=` — numeric comparison against
+  `amount` or any raw column that parses as a number.
+- `field == "text"` / `!=` — exact string comparison.
+- Combine two conditions with `and` / `or` (left to right, no
+  parentheses in v0).
+
+`commodity` is deliberately per-rules-file, not global: a specific bank
+statement genuinely is in one specific currency, which is a fact about
+*that file*, never something JAMA should assume for every user. Omit it
+and JAMA falls back to the `[source].account`'s declared currency, then
+the ledger's default — same resolution as `jama add`.
+
+Rows JAMA can't match any rule for are left "unmatched"; run
+interactively (a TTY attached, no `--json`/`--quiet`), it asks you to
+categorise each one and offers to append a new `[[rule]]` for the next
+import. Import is idempotent: a hash of (date, amount, payee, source
+file) is recorded per row, so re-running `jama import` on the same file
+skips everything it's already seen.
 
 ## Other export formats
 

@@ -19,7 +19,7 @@ pub fn run(
     from: &Option<String>,
     to: &Option<String>,
     date: &Option<String>,
-    commodity: &str,
+    commodity: &Option<String>,
     payee: &Option<String>,
 ) -> Result<(), CliError> {
     let (narration, amount, from, to, date, payee) = if narration.is_none() {
@@ -74,11 +74,15 @@ pub fn run(
             "account must start with assets:/liabilities:/equity:/income:/expenses:",
         )
     })?;
+    let commodity =
+        ledger.resolve_commodity(commodity.as_deref(), &[&from_account, &to_account])?;
 
     let mut txn = Transaction::new(date, narration);
     txn.payee = payee;
-    txn.postings
-        .push(Posting::new(from_account, Amount::new(-amount, commodity)));
+    txn.postings.push(Posting::new(
+        from_account,
+        Amount::new(-amount, commodity.clone()),
+    ));
     txn.postings
         .push(Posting::new(to_account, Amount::new(amount, commodity)));
 

@@ -19,9 +19,18 @@ fn fixture(name: &str) -> std::path::PathBuf {
         .join(name)
 }
 
+/// A ledger with a configured default commodity (SAR — an arbitrary
+/// choice for these tests, not a product default: `--commodity` on
+/// `init` is optional, and most of these tests exist specifically to
+/// exercise that path rather than relying on some baked-in currency).
 fn init_ledger() -> TempDir {
     let dir = TempDir::new().unwrap();
-    jama().arg("init").arg(dir.path()).assert().success();
+    jama()
+        .arg("init")
+        .arg(dir.path())
+        .args(["--commodity", "SAR"])
+        .assert()
+        .success();
     dir
 }
 
@@ -651,4 +660,70 @@ fn completions_do_not_require_an_existing_ledger() {
         .assert()
         .success()
         .stdout(predicate::str::contains("_jama"));
+}
+
+#[test]
+fn add_without_a_resolvable_commodity_fails_with_an_actionable_error() {
+    // Regression test: `jama add` used to silently default to SAR for
+    // every user. With no --commodity, no ledger default (init without
+    // --commodity), and no account declaring a currency, it must fail
+    // loudly instead of guessing.
+    let dir = TempDir::new().unwrap();
+    jama().arg("init").arg(dir.path()).assert().success();
+
+    jama()
+        .args(["-f"])
+        .arg(dir.path())
+        .args([
+            "add",
+            "Coffee",
+            "12.50",
+            "--from",
+            "assets:checking",
+            "--to",
+            "expenses:cafe",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("--commodity"));
+}
+
+#[test]
+fn init_commodity_flag_sets_a_real_ledger_default_not_a_hardcoded_one() {
+    let dir = TempDir::new().unwrap();
+    jama()
+        .arg("init")
+        .arg(dir.path())
+        .args(["--commodity", "EUR"])
+        .assert()
+        .success();
+
+    // No --commodity on add: it must resolve via the ledger's own
+    // configured default (EUR here), not some value baked into the binary.
+    jama()
+        .args(["-f"])
+        .arg(dir.path())
+        .args([
+            "add",
+            "Coffee",
+            "12.50",
+            "--from",
+            "assets:checking",
+            "--to",
+            "expenses:cafe",
+        ])
+        .assert()
+        .success();
+
+    let out = jama()
+        .args(["-f"])
+        .arg(dir.path())
+        .args(["list", "--json"])
+        .output()
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    let commodity = json["transactions"][0]["postings"][0]["amount"]["commodity"]
+        .as_str()
+        .unwrap();
+    assert_eq!(commodity, "EUR");
 }

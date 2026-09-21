@@ -39,6 +39,7 @@ pub fn run(
     let mut categorized = 0usize;
     if !dry_run && !outcome.unmatched.is_empty() && !cli.quiet && !cli.json {
         let source_account = Account::parse(&rules.source.account).map_err(CliError::internal)?;
+        let commodity = csv_import::resolve_commodity(ledger, &rules, &source_account)?;
         let mut still_unmatched = Vec::new();
         for row in outcome.unmatched.drain(..) {
             println!(
@@ -57,7 +58,7 @@ pub fn run(
                 still_unmatched.push(row);
                 continue;
             }
-            csv_import::insert_row(ledger, &source_account, dest, &row)?;
+            csv_import::insert_row(ledger, &source_account, dest, &commodity, &row)?;
             let _ = Rules::append_learned_rule(&rules_path, &row.payee, dest);
             categorized += 1;
         }

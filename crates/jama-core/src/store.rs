@@ -80,6 +80,15 @@ CREATE TABLE IF NOT EXISTS import_dedupe (
     transaction_id INTEGER,
     imported_at TEXT NOT NULL
 );
+
+-- Ledger-level settings (currently just an optional default commodity).
+-- Nothing here has a value baked into the binary: an unset key means
+-- "not configured", and callers decide what to do about that — never a
+-- hardcoded fallback currency.
+CREATE TABLE IF NOT EXISTS settings (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+);
 "#;
 
 /// Filters accepted by [`Store::list_transactions`]; all are optional and
@@ -247,6 +256,46 @@ impl Store {
             )
             .optional()?;
         Ok(precision.unwrap_or(2))
+    }
+
+    // -- settings ------------------------------------------------------------
+
+    pub fn get_setting(&self, key: &str) -> Result<Option<String>> {
+        self.conn
+            .query_row(
+                "SELECT value FROM settings WHERE key = ?1",
+                params![key],
+                |r| r.get(0),
+            )
+            .optional()
+            .map_err(JamaError::from)
+    }
+
+    pub fn set_setting(&self, key: &str, value: &str) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO settings (key, value) VALUES (?1, ?2)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            params![key, value],
+        )?;
+        Ok(())
+    }
+
+    /// The commodity codes declared (via `open`) for a single account, if
+    /// any. Used to infer a transaction's commodity from context instead
+    /// of assuming one.
+    pub fn declared_currencies_for(&self, account: &str) -> Result<Vec<String>> {
+        let currencies: Option<String> = self
+            .conn
+            .query_row(
+                "SELECT currencies FROM accounts WHERE name = ?1",
+                params![account],
+                |r| r.get(0),
+            )
+            .optional()?;
+        Ok(match currencies {
+            Some(c) if !c.is_empty() => c.split(',').map(str::to_string).collect(),
+            _ => Vec::new(),
+        })
     }
 
     // -- transactions ------------------------------------------------------

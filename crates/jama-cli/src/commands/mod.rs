@@ -19,9 +19,9 @@ use crate::{Cli, CliError, Commands};
 pub fn dispatch(cli: &Cli, command: &Commands, palette: &Palette) -> Result<(), CliError> {
     let root = jama_core::ledger::Paths::resolve(cli.file.as_deref());
 
-    if let Commands::Init { path } = command {
+    if let Commands::Init { path, commodity } = command {
         let root = path.clone().unwrap_or(root);
-        return init::run(&root, cli, palette);
+        return init::run(&root, cli, palette, commodity.as_deref());
     }
     if let Commands::Completions { shell } = command {
         return completions::run(*shell);

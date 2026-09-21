@@ -87,6 +87,45 @@ impl Ledger {
         })
     }
 
+    pub fn set_default_commodity(&self, code: &str) -> Result<()> {
+        self.store.set_setting("default_commodity", code)
+    }
+
+    pub fn default_commodity(&self) -> Result<Option<String>> {
+        self.store.get_setting("default_commodity")
+    }
+
+    /// Resolve which commodity a new posting should use when the caller
+    /// didn't say explicitly. JAMA never assumes a currency out of thin
+    /// air: this tries, in order, an explicit override, then any account
+    /// in `accounts` that has exactly one declared currency (via `open`),
+    /// then this ledger's configured default (see
+    /// [`Self::set_default_commodity`]) — and fails with an actionable
+    /// error if none of those resolve anything.
+    pub fn resolve_commodity(
+        &self,
+        explicit: Option<&str>,
+        accounts: &[&Account],
+    ) -> Result<String> {
+        if let Some(c) = explicit {
+            return Ok(c.to_string());
+        }
+        for account in accounts {
+            let declared = self.store.declared_currencies_for(account.as_str())?;
+            if declared.len() == 1 {
+                return Ok(declared[0].clone());
+            }
+        }
+        if let Some(default) = self.default_commodity()? {
+            return Ok(default);
+        }
+        let hint_account = accounts.first().map(|a| a.as_str()).unwrap_or("<account>");
+        Err(JamaError::Invalid(format!(
+            "no commodity specified for this transaction — pass --commodity CODE, declare \
+             `open {hint_account} CODE`, or set a ledger default with `jama init --commodity CODE`"
+        )))
+    }
+
     /// Open an existing ledger directory.
     pub fn open(root: &Path) -> Result<Self> {
         let paths = Paths::for_root(root);
@@ -220,5 +259,67 @@ impl Ledger {
             source: e,
         })?;
         parser::parse(&text)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn acct(s: &str) -> Account {
+        Account::parse(s).unwrap()
+    }
+
+    /// The whole point: with nothing configured or declared, `jama add`
+    /// must fail with an actionable error instead of silently assuming a
+    /// currency.
+    #[test]
+    fn resolve_commodity_errors_when_nothing_resolves() {
+        let dir = tempfile::tempdir().unwrap();
+        let ledger = Ledger::init(dir.path()).unwrap();
+        let checking = acct("assets:checking");
+        let err = ledger.resolve_commodity(None, &[&checking]).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("--commodity"),
+            "error should point at the fix: {msg}"
+        );
+    }
+
+    #[test]
+    fn resolve_commodity_prefers_explicit_override() {
+        let dir = tempfile::tempdir().unwrap();
+        let ledger = Ledger::init(dir.path()).unwrap();
+        ledger.set_default_commodity("SAR").unwrap();
+        let checking = acct("assets:checking");
+        assert_eq!(
+            ledger.resolve_commodity(Some("USD"), &[&checking]).unwrap(),
+            "USD"
+        );
+    }
+
+    #[test]
+    fn resolve_commodity_uses_declared_account_currency_before_the_ledger_default() {
+        let dir = tempfile::tempdir().unwrap();
+        let ledger = Ledger::init(dir.path()).unwrap();
+        ledger.set_default_commodity("SAR").unwrap();
+        let wallet = acct("assets:wallet");
+        ledger
+            .declare_account(
+                Date::from_ymd(2026, 1, 1).unwrap(),
+                &wallet,
+                &["EUR".to_string()],
+            )
+            .unwrap();
+        assert_eq!(ledger.resolve_commodity(None, &[&wallet]).unwrap(), "EUR");
+    }
+
+    #[test]
+    fn resolve_commodity_falls_back_to_ledger_default() {
+        let dir = tempfile::tempdir().unwrap();
+        let ledger = Ledger::init(dir.path()).unwrap();
+        ledger.set_default_commodity("GBP").unwrap();
+        let checking = acct("assets:checking");
+        assert_eq!(ledger.resolve_commodity(None, &[&checking]).unwrap(), "GBP");
     }
 }

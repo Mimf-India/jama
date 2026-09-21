@@ -128,6 +128,7 @@ amount = "Amount"
 payee = "Description"
 date_format = "%d/%m/%Y"
 account = "assets:checking"
+commodity = "SAR"
 
 [[rule]]
 match = "amount < 1000000"
