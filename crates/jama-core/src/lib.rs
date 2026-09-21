@@ -11,6 +11,7 @@ pub mod model;
 pub mod parser;
 pub mod reports;
 pub mod store;
+pub mod testkit;
 
 pub use date::Date;
 pub use error::{JamaError, Result};

@@ -17,3 +17,24 @@ csv = "1"
 
 [dev-dependencies]
 tempfile = "3"
+criterion = { version = "0.5", default-features = false }
+
+[[bench]]
+name = "parse_and_validate"
+harness = false
+path = "../../benches/parse_and_validate.rs"
+
+[[bench]]
+name = "balance"
+harness = false
+path = "../../benches/balance.rs"
+
+[[bench]]
+name = "register"
+harness = false
+path = "../../benches/register.rs"
+
+[[bench]]
+name = "import"
+harness = false
+path = "../../benches/import.rs"

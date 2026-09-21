@@ -33,6 +33,7 @@ use crate::date::Date;
 use crate::error::{JamaError, Result};
 use crate::ledger::Ledger;
 use crate::model::{Account, Amount, Flag, Posting, Transaction};
+use crate::store::Store;
 
 #[derive(Debug, Deserialize)]
 struct RawRulesFile {
@@ -217,32 +218,66 @@ pub fn import(
         unmatched: Vec::new(),
     };
 
-    for row in rows {
-        if ledger.store.has_import_hash(&row.dedupe_hash)? {
-            outcome.skipped_duplicates += 1;
-            continue;
-        }
-        match rules.destination_for(&row) {
-            Some(destination) => {
-                if !dry_run {
-                    insert_row(ledger, &source_account, destination, &row)?;
-                }
-                outcome.imported += 1;
+    if dry_run {
+        for row in rows {
+            if ledger.store.has_import_hash(&row.dedupe_hash)? {
+                outcome.skipped_duplicates += 1;
+                continue;
             }
-            None => outcome.unmatched.push(row),
+            match rules.destination_for(&row) {
+                Some(_) => outcome.imported += 1,
+                None => outcome.unmatched.push(row),
+            }
         }
+        return Ok(outcome);
     }
-    if !dry_run {
-        ledger.sync_text_file()?;
-    }
+
+    // The whole batch runs inside one SQLite transaction: inserting rows
+    // one at a time, each auto-committing (and fsyncing) on its own, is
+    // what made a 1,000-row import take ~4.5s instead of the ~200ms
+    // budget in §7 of the brief.
+    let (mut imported, mut skipped, mut unmatched) = (0usize, 0usize, Vec::new());
+    ledger.store.with_transaction(|store| {
+        for row in &rows {
+            if store.has_import_hash(&row.dedupe_hash)? {
+                skipped += 1;
+                continue;
+            }
+            match rules.destination_for(row) {
+                Some(destination) => {
+                    insert_row_in_store(store, &source_account, destination, row)?;
+                    imported += 1;
+                }
+                None => unmatched.push(row.clone()),
+            }
+        }
+        Ok(())
+    })?;
+    outcome.imported = imported;
+    outcome.skipped_duplicates = skipped;
+    outcome.unmatched = unmatched;
+
+    ledger.sync_text_file()?;
     Ok(outcome)
 }
 
 /// Insert a single categorised row as a transaction and record its dedupe
-/// hash — used both for rule-matched rows and for rows the caller
-/// categorised interactively.
+/// hash — used for rows the caller categorised interactively, one at a
+/// time, after `import()`'s bulk pass left them unmatched.
 pub fn insert_row(
     ledger: &mut Ledger,
+    source_account: &Account,
+    destination: &str,
+    row: &CsvRow,
+) -> Result<i64> {
+    insert_row_in_store(&ledger.store, source_account, destination, row)
+}
+
+/// The actual insert, against a `Store` directly rather than a `Ledger` —
+/// so the bulk importer above can run many of these inside a single
+/// SQLite transaction instead of one transaction (and fsync) per row.
+fn insert_row_in_store(
+    store: &Store,
     source_account: &Account,
     destination: &str,
     row: &CsvRow,
@@ -255,8 +290,10 @@ pub fn insert_row(
         Amount::new(row.amount, "SAR"),
     ));
     txn.postings.push(Posting::elided(destination));
-    let id = ledger.add_transaction_no_sync(txn)?;
-    ledger.store.record_import_hash(&row.dedupe_hash, id)?;
+    let resolved = txn.resolve_postings().map_err(JamaError::Imbalance)?;
+    txn.postings = resolved;
+    let id = store.insert_transaction(&txn)?;
+    store.record_import_hash(&row.dedupe_hash, id)?;
     Ok(id)
 }
 

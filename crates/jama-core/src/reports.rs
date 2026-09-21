@@ -29,36 +29,30 @@ pub struct BalanceOptions {
 }
 
 pub fn balance(store: &Store, opts: &BalanceOptions) -> Result<Vec<AccountBalance>> {
-    let filter = ListFilter {
-        since: opts.since,
-        until: opts.until,
-        ..Default::default()
-    };
-    let txns = store.list_transactions(&filter)?;
+    // A lean, purpose-built query (see `Store::posting_rows`) instead of
+    // hydrating full `Transaction`s: a full-tree balance only ever needs
+    // the (account, number, commodity) triples, so skipping date/flag/
+    // payee/narration/tags/links/JSON-meta reconstruction for every
+    // posting is what keeps this inside its performance budget on a
+    // large ledger.
+    let rows = store.posting_rows(opts.since, opts.until, opts.cleared_only)?;
 
     let mut sums: BTreeMap<String, BTreeMap<String, Decimal>> = BTreeMap::new();
-    for t in &txns {
-        if opts.cleared_only && t.flag != Flag::Cleared {
-            continue;
-        }
-        for p in &t.postings {
-            if let Some(pattern) = &opts.account_pattern {
-                if !p.account.matches(pattern) {
-                    continue;
-                }
-            }
-            let key = match opts.depth {
-                Some(d) => p.account.prefix(d),
-                None => p.account.as_str().to_string(),
-            };
-            if let Some(amount) = &p.amount {
-                *sums
-                    .entry(key)
-                    .or_default()
-                    .entry(amount.commodity.clone())
-                    .or_insert(Decimal::ZERO) += amount.number;
+    for (account_str, number, commodity) in rows {
+        if let Some(pattern) = &opts.account_pattern {
+            if !account_str_matches(&account_str, pattern) {
+                continue;
             }
         }
+        let key = match opts.depth {
+            Some(d) => account_str_prefix(&account_str, d),
+            None => account_str,
+        };
+        *sums
+            .entry(key)
+            .or_default()
+            .entry(commodity)
+            .or_insert(Decimal::ZERO) += number;
     }
 
     Ok(sums
@@ -73,6 +67,27 @@ pub fn balance(store: &Store, opts: &BalanceOptions) -> Result<Vec<AccountBalanc
         })
         .filter(|ab| !ab.balances.is_empty())
         .collect())
+}
+
+/// Equivalent to [`Account::matches`], operating on the raw string a
+/// posting row already carries (it was validated once, at insert time —
+/// re-parsing it into an `Account` for every row in a large ledger is
+/// wasted work a hot report path shouldn't pay for).
+fn account_str_matches(account: &str, pattern: &str) -> bool {
+    let pattern = pattern.strip_suffix(':').unwrap_or(pattern);
+    if pattern.is_empty() {
+        return true;
+    }
+    account == pattern || account.starts_with(&format!("{pattern}:"))
+}
+
+/// Equivalent to [`Account::prefix`], on a raw string.
+fn account_str_prefix(account: &str, depth: usize) -> String {
+    account
+        .splitn(depth + 1, ':')
+        .take(depth)
+        .collect::<Vec<_>>()
+        .join(":")
 }
 
 // -- register ------------------------------------------------------------
@@ -95,42 +110,30 @@ pub fn register(
     since: Option<Date>,
     until: Option<Date>,
 ) -> Result<Vec<RegisterEntry>> {
-    let filter = ListFilter {
-        since,
-        until,
-        ..Default::default()
-    };
-    let mut txns = store.list_transactions(&filter)?;
-    txns.sort_by_key(|t| (t.date, t.id));
+    // See `Store::register_rows`: this fetches exactly the matching
+    // postings, joined with just the transaction fields register
+    // displays, already ordered — no full-ledger hydration.
+    let rows = store.register_rows(account_pattern, since, until)?;
 
     let mut running: BTreeMap<String, Decimal> = BTreeMap::new();
-    let mut entries = Vec::new();
-    for t in &txns {
-        for p in &t.postings {
-            if !p.account.matches(account_pattern) {
-                continue;
-            }
-            if let Some(amount) = &p.amount {
-                let bal = running
-                    .entry(amount.commodity.clone())
-                    .or_insert(Decimal::ZERO);
-                *bal += amount.number;
-                let running_balance: Vec<Amount> = running
-                    .iter()
-                    .map(|(c, n)| Amount::new(*n, c.clone()))
-                    .collect();
-                entries.push(RegisterEntry {
-                    transaction_id: t.id.unwrap_or_default(),
-                    date: t.date,
-                    flag: t.flag,
-                    payee: t.payee.clone(),
-                    narration: t.narration.clone(),
-                    account: p.account.to_string(),
-                    amount: amount.clone(),
-                    running_balance,
-                });
-            }
-        }
+    let mut entries = Vec::with_capacity(rows.len());
+    for (transaction_id, date, flag, payee, narration, account, number, commodity) in rows {
+        let bal = running.entry(commodity.clone()).or_insert(Decimal::ZERO);
+        *bal += number;
+        let running_balance: Vec<Amount> = running
+            .iter()
+            .map(|(c, n)| Amount::new(*n, c.clone()))
+            .collect();
+        entries.push(RegisterEntry {
+            transaction_id,
+            date,
+            flag,
+            payee,
+            narration,
+            account,
+            amount: Amount::new(number, commodity),
+            running_balance,
+        });
     }
     Ok(entries)
 }
