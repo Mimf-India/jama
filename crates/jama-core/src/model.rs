@@ -72,8 +72,11 @@ impl Account {
     }
 
     /// Whether this account is `pattern` itself or a descendant of it.
-    /// An empty pattern matches everything.
+    /// An empty pattern matches everything. A trailing `:` on the pattern
+    /// (as in `jama balance assets:`) is treated the same as no trailing
+    /// colon — both mean "this account or anything under it".
     pub fn matches(&self, pattern: &str) -> bool {
+        let pattern = pattern.strip_suffix(':').unwrap_or(pattern);
         if pattern.is_empty() {
             return true;
         }
@@ -471,6 +474,15 @@ mod tests {
         assert!(a.matches("assets"));
         assert!(a.matches("assets:checking"));
         assert!(!a.matches("assets:savings"));
+    }
+
+    #[test]
+    fn matches_accepts_trailing_colon_pattern() {
+        // `jama balance assets:` (the acceptance walkthrough's own example)
+        // must match the same accounts as `jama balance assets`.
+        let a = acct("assets:checking");
+        assert!(a.matches("assets:"));
+        assert!(acct("assets").matches("assets:"));
     }
 
     #[test]
