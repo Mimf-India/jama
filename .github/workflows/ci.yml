@@ -1,0 +1,146 @@
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+    tags: ["v*"]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  test:
+    name: Test, lint, format
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+
+      - name: cargo fmt --check
+        run: cargo fmt --all -- --check
+
+      - name: cargo clippy -D warnings
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: cargo test
+        run: cargo test --workspace
+
+  bench:
+    name: Benchmarks vs §7 budget
+    runs-on: ubuntu-latest
+    needs: test
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Run benchmarks
+        run: |
+          echo "# JAMA v0 benchmark results" | tee bench-results.md
+          echo "" | tee -a bench-results.md
+          echo "Budgets: parse+validate 10k txns <=50ms, balance full tree <=30ms, register one account <=20ms, import 1000 rows <=200ms." | tee -a bench-results.md
+          echo "" | tee -a bench-results.md
+          for bench in parse_and_validate balance register import; do
+            cargo bench -p jama-core --bench "$bench" -- --warm-up-time 1 --measurement-time 3 | tee -a bench-results.md
+          done
+
+      - name: Publish benchmark table
+        if: always()
+        run: cat bench-results.md >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: bench-results
+          path: bench-results.md
+
+  build:
+    name: Build (${{ matrix.target }})
+    needs: test
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+            artifact: jama-x86_64-unknown-linux-gnu.tar.gz
+          - target: x86_64-unknown-linux-musl
+            os: ubuntu-latest
+            artifact: jama-x86_64-unknown-linux-musl.tar.gz
+            musl: true
+          - target: aarch64-apple-darwin
+            os: macos-14
+            artifact: jama-aarch64-apple-darwin.tar.gz
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+            artifact: jama-x86_64-pc-windows-msvc.zip
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      - name: Install musl tools
+        if: matrix.musl
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+
+      - name: Build release binary
+        run: cargo build --release --locked -p jama-cli --target ${{ matrix.target }}
+
+      - name: Check binary size budget (<15MB)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          size=$(stat -c%s "target/${{ matrix.target }}/release/jama" 2>/dev/null || stat -f%z "target/${{ matrix.target }}/release/jama")
+          echo "binary size: $size bytes"
+          if [ "$size" -gt 15728640 ]; then
+            echo "::error::release binary is $size bytes, over the 15MB budget"
+            exit 1
+          fi
+
+      - name: Package (unix)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          cd target/${{ matrix.target }}/release
+          tar -czf "$GITHUB_WORKSPACE/${{ matrix.artifact }}" jama
+        working-directory: .
+
+      - name: Package (windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          Compress-Archive -Path "target/${{ matrix.target }}/release/jama.exe" -DestinationPath "${{ matrix.artifact }}"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: ${{ matrix.artifact }}
+
+  release:
+    name: Attach release artefacts
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [build, bench]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: artifacts/*
+          generate_release_notes: true
