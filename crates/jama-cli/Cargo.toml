@@ -23,6 +23,10 @@ rust_decimal = { version = "1", default-features = false, features = ["std"] }
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 
+[[test]]
+name = "cli"
+path = "../../tests/cli.rs"
+
 [dev-dependencies]
 assert_cmd = "2"
 predicates = "3"

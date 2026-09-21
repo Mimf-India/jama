@@ -526,4 +526,26 @@ mod tests {
         let directives = parse(text).unwrap();
         assert_eq!(serialize(&directives), text);
     }
+
+    /// The fixture ledgers under `fixtures/` (used by the CLI's own
+    /// integration tests as reference material) must parse cleanly and
+    /// every transaction in them must balance.
+    #[test]
+    fn fixture_ledgers_parse_and_balance() {
+        for name in ["multi_currency.beancount", "arabic_payees.beancount"] {
+            let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../fixtures")
+                .join(name);
+            let text =
+                std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("reading {path:?}: {e}"));
+            let directives = parse(&text).unwrap_or_else(|e| panic!("parsing {path:?}: {e}"));
+            assert!(!directives.is_empty(), "{path:?} produced no directives");
+            for d in &directives {
+                if let Directive::Transaction(t) = d {
+                    t.resolve_postings()
+                        .unwrap_or_else(|e| panic!("{path:?}: {e}"));
+                }
+            }
+        }
+    }
 }

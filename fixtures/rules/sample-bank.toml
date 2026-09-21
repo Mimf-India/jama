@@ -1,0 +1,14 @@
+[source]
+date = "Date"
+amount = "Amount"
+payee = "Description"
+date_format = "%d/%m/%Y"
+account = "assets:checking"
+
+[[rule]]
+match = "payee ~ /uber|careem/i"
+to = "expenses:transport"
+
+[[rule]]
+match = "amount < 0 and payee ~ /rent/i"
+to = "expenses:rent"

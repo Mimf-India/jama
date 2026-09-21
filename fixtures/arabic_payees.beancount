@@ -1,0 +1,11 @@
+2026-02-01 open assets:checking SAR
+2026-02-01 open expenses:cafe
+2026-02-01 open expenses:transport
+
+2026-02-01 * "مطعم الرياض" "غداء مع صديق"
+  assets:checking  -85.50 SAR
+  expenses:cafe  85.50 SAR
+
+2026-02-03 * "أوبر" "رحلة إلى المطار"
+  assets:checking  -120.00 SAR
+  expenses:transport  120.00 SAR

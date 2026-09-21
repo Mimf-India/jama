@@ -1,0 +1,11 @@
+2026-01-01 open assets:wallet
+2026-01-01 open income:salary
+2026-01-01 open income:consulting
+
+2026-01-05 * "Salary" "Monthly salary in riyals"
+  income:salary  -18000.00 SAR
+  assets:wallet  18000.00 SAR
+
+2026-01-10 * "Consulting" "Paid in dollars"
+  income:consulting  -500.00 USD
+  assets:wallet  500.00 USD
