@@ -7,7 +7,13 @@ flash timing, or real SD card behaviour. Every recommendation below is
 grounded in the current (September 2026) state of the RP2040/RP2350 specs
 and the embedded-Rust ecosystem, verified against current sources (see
 citations), but "compiles for the target" is the only thing that can
-actually be checked from here — see [§10](#10-what-i-can-and-cant-verify-from-here).
+actually be checked from here — see [§9](#9-verification-limits--what-i-can-and-cant-check-from-here).
+
+**Confirmed: this is a standalone, battery-powered handheld device** — not
+a USB-tethered gadget you type commands into from a laptop. That resolves
+what was "open question #3" and reshapes §6 below: physical buttons and a
+small display are the primary interface; USB serial becomes a secondary
+setup/debug/export channel, not the main way anyone uses the thing.
 
 ## 1. Why this is a different product, not a port
 
@@ -57,6 +63,41 @@ matters directly for how large a ledger can live in the flash-log backend
 
 Sources: [Raspberry Pi Pico 2 / RP2350 specs](https://www.adafruit.com/product/6006), [Tom's Hardware on RP2350](https://www.tomshardware.com/raspberry-pi/raspberry-pi-pico/whats-inside-the-raspberry-pi-pico-2s-rp2350), [RP2040 specifications](https://www.raspberrypi.com/products/rp2040/specifications/).
 
+## 2a. Reference hardware for a handheld build
+
+A bare Pico has no display and no buttons — a handheld device needs both,
+plus a battery. Rather than wiring discrete components from scratch,
+two existing RP2040 boards already combine "buttons + display + battery
+connector" and are worth using as-is (or as the reference to clone),
+each with a real, opposite trade-off:
+
+| | **Pimoroni Badger 2040** | **Pico + Pimoroni Pico Display Pack** |
+|---|---|---|
+| Form factor | One integrated board (RP2040 built in) | Pico + a clip-on add-on board (two-part) |
+| Display | 2.9" e-ink, 296×128, monochrome | 1.14" IPS LCD, 240×135, 18-bit colour |
+| Buttons | 5, along the front edge | 4 (A/B/X/Y) + an RGB LED |
+| Refresh feel | Slow (roughly 1–2s for a full refresh; partial refresh is faster but e-ink still isn't snappy) — but **draws power only while refreshing**, near-zero at rest | Fast, backlit, good for a live interactive menu — but the backlight draws power continuously while on |
+| Battery | No onboard charging circuit; ships with a 2×AAA holder (swap-and-discard, or add an external LiPo charger like Pimoroni's "LiPo Amigo" yourself) | Whatever you wire in — a Pico has no charging circuit either; typically a LiPo + separate charger module (e.g. a TP4056 board) feeding VSYS |
+| Rust support | CircuitPython is Pimoroni's documented path; Rust needs a driver for its e-ink controller written or ported (not yet confirmed to exist as a ready-made no_std crate) | A documented [Rust gist](https://gist.github.com/9names/476e20e055b9fc9a5fdb523068a19290) drives it via `embedded-graphics`, and `pimoroni_gfx_pack` (a crate for Pimoroni's similar GFX Pack product) shows the pattern is established for this product family |
+
+**Neither is a slam-dunk without a trade-off**, and this is a genuine
+product-feel decision, not just an engineering one: Badger 2040 feels
+like an e-reader/badge — sips power, refreshes slowly; Pico + Display
+Pack feels like a snappy little gadget with a bright screen — more
+pleasant to navigate quickly, drains its battery faster. **Open question
+#6** (§13).
+
+Either way, the RP2040 itself is a real constraint on battery life:
+current sources put its lowest achievable sleep current around 180 µA
+even in its best "dormant" mode, and dormant mode doesn't support RTC
+wake without an external clock source, so a practical low-power sleep
+that can still wake on a timer sits closer to a few mA rather than the
+sub-µA figures purpose-built low-power MCUs (e.g. an nRF52) achieve. A
+handheld device that's mostly idle in a pocket should still expect to be
+charged every few days to a couple of weeks, not months — worth setting
+that expectation now rather than after a battery disappoints someone.
+Source: [RP2040 dormant/sleep current discussion](https://news.ycombinator.com/item?id=40155807), [embassy-rp dormant_sleep docs](https://docs.embassy.dev/embassy-rp/git/rp2040/clocks/fn.dormant_sleep.html).
+
 ## 3. Toolchain
 
 - `#![no_std]`, `#![no_main]`, `cortex-m-rt` for the vector table/reset
@@ -75,11 +116,20 @@ Sources: [Raspberry Pi Pico 2 / RP2350 specs](https://www.adafruit.com/product/6
   Windows.
 - `heapless` for every buffer (`String<N>`, `Vec<T, N>`) instead of a
   global allocator — see §5 for why.
-- `sequential-storage` for the onboard-flash log backend (§4, Phase 1):
+- `embedded-graphics` for on-device rendering (text, simple shapes) — the
+  de facto standard `no_std` 2D graphics crate that essentially every
+  Rust display driver (LCD or e-ink) targets, plus the specific panel
+  driver crate for whichever board is chosen (§2a) — the exact crate
+  name depends on the panel controller chip and should be pinned down
+  once a board is picked, not guessed here.
+- A software debounce for the buttons (a few lines: require N
+  consecutive stable reads, or a short timer, before treating a press as
+  real) — no crate strictly needed for 4–5 buttons.
+- `sequential-storage` for the onboard-flash log backend (§4, Phase 2):
   a log-structured, wear-levelling, corruption-repairing key-value/queue
   store built specifically for this problem, used in production outside
   its own maintainer (Tweede golf) per current docs.
-- `embedded-sdmmc` for the SD-card backend (§4, Phase 2): pure-Rust,
+- `embedded-sdmmc` for the SD-card backend (§4, Phase 4): pure-Rust,
   `no_std`, no-alloc FAT16/32 driver; needs a `BlockDevice` impl talking
   SPI to the card (the crate ships one).
 - Flashing: the RP2040/2350 ROM bootloader (hold BOOTSEL at power-up)
@@ -98,7 +148,7 @@ The desktop build's "plain text is the source of truth" promise is easy
 to keep with a full filesystem; on a microcontroller it's a real design
 choice with two credible answers, plus a middle path.
 
-### Option A — onboard QSPI flash, binary log (Phase 1: no extra hardware)
+### Option A — onboard QSPI flash, binary log (Phase 2: no extra hardware)
 
 Reserve a region of the onboard flash (e.g. the last 512 KB–1 MB) as an
 append-only log of small binary records via `sequential-storage`'s queue
@@ -120,7 +170,7 @@ purpose-built crate has already solved and tested).
   writer that only erases a sector when it fills), and
   `sequential-storage` adds CRC + repair-on-open for power-loss safety.
 
-### Option B — SD card, native plain text (Phase 2: needs a breakout board)
+### Option B — SD card, native plain text (Phase 4: needs a breakout board)
 
 Wire a µSD breakout over SPI (4 signal wires + power; ~$3 part, not
 present on a bare Pico board) and mount it with `embedded-sdmmc`. Store
@@ -152,14 +202,14 @@ trait LedgerStore {
 }
 ```
 
-Phase 1 ships the flash-log backend — fastest path to something real and
-testable with zero extra parts. Phase 2 adds the SD-card backend as a
-hardware upgrade for whoever wants the fully-native plain-text promise
-and more headroom; the REPL and double-entry logic don't change, only
-which `LedgerStore` impl is wired up. **Open question #2** (§13): is an
-SD breakout actually part of your hardware plan, or should Phase 1's
-flash-log approach be treated as the permanent answer, not a stepping
-stone?
+Phase 2 ships the flash-log backend — fastest path to something real and
+testable with zero extra parts (§12). A later phase adds the SD-card
+backend as a hardware upgrade for whoever wants the fully-native
+plain-text promise and more headroom; the menu UI and double-entry logic
+don't change, only which `LedgerStore` impl is wired up. **Open question
+#4** (§13): is an SD breakout actually part of your hardware plan, or
+should the flash-log approach be treated as the permanent answer, not a
+stepping stone?
 
 ## 5. Data model for 264 KB–520 KB of RAM
 
@@ -181,6 +231,21 @@ financial history) for convenience this domain shouldn't want.
   doesn't fit is a **loud, explicit error** at input time, never a
   silent truncation — silently truncating a financial account name is
   exactly the kind of failure mode this whole project exists to avoid.
+- **Quick-account list**: with no keyboard, typing a colon-separated
+  account path button-by-button isn't realistic (see §6's text-entry
+  discussion). v0's answer is a small, on-device-editable list of
+  pre-declared accounts (`heapless::Vec<AccountEntry, 16>`, say) that
+  the button UI scrolls through instead of accepting free text. New
+  accounts get added to the list via the USB-serial admin channel (§6),
+  which *can* reasonably take typed text since it's a one-time setup
+  action on a real keyboard, not a per-transaction one on a 5-button pad.
+- **Narration**: v0 does **not** support free-text narration entry on
+  the device itself — the same "no realistic on-device typing" problem.
+  A transaction's narration defaults to its selected quick-account's own
+  label (e.g. picking the "Coffee" quick-account gives narration
+  `"Coffee"` for free); true free-text narration, if ever wanted, is a
+  later feature entered via the USB-serial admin channel or the
+  desktop companion tool (§10), not typed on the handheld.
 - **Dates**: reuse the desktop `jama-core::date::Date`'s exact algorithm
   (days-since-epoch via the Howard Hinnant civil-calendar functions) —
   pure integer math, no_std-compatible as-is, genuinely shareable logic
@@ -195,78 +260,120 @@ financial history) for convenience this domain shouldn't want.
 
 ## 6. Interaction model
 
-USB CDC-ACM (`usbd-serial`) presenting as `/dev/ttyACM0` (Linux/macOS) or
-a COM port (Windows) once plugged in — no host-side driver install on any
-current OS. A line-buffered REPL over that port:
+**Primary: buttons + display, no host PC needed.** This is the whole
+point of "handheld" — it has to work standalone, pulled out of a pocket,
+with no laptop nearby. USB serial (below) exists for setup and recovery,
+not day-to-day use.
+
+### Menu-driven UI (primary)
+
+With 4–5 buttons and no keyboard, free text is off the table (see §5), so
+the UI is a hierarchical menu navigated with Up/Down/Select/Back
+(the exact button count and labels depend on which board — §2a):
 
 ```
-jama> add "Coffee" 12.50 from=assets:checking to=expenses:cafe
-ok, txn #47
-jama> balance assets:checking
-assets:checking  -142.50 SAR
-jama> list 5
-...last 5 transactions...
+┌─────────────────┐
+│ JAMA             │   Main menu, Up/Down to move, Select to enter
+│ > Add            │
+│   Balance        │
+│   Check          │
+│   Settings       │
+└─────────────────┘
+
+Add → pick a quick-account (from-side)   [Up/Down through the list]
+    → pick a quick-account (to-side)
+    → dial in the amount via a digit spinner:
+         [ 0 1 2 . 5 0 ]  ← Up/Down changes the highlighted digit,
+                             Select moves to the next one, long-press
+                             Select on the last digit confirms
+    → date defaults to "today" (from the on-chip RTC, §7); Select to
+      accept, or Up/Down to nudge it a day at a time for a backdated entry
+    → confirmation screen, Select to save
+```
+
+`Balance` scrolls the quick-account list showing each one's running
+total; `Check` shows a pass/fail summary (transaction count, imbalance
+count — the same numbers `jama check` reports on desktop, computed the
+same way); `Settings` is where the quick-account list itself gets edited
+— either with the same button UI (slow, tedious for typing a new
+16-character account name one letter at a time) or, more realistically,
+deferred to the USB-serial admin channel below for anything beyond
+picking from what's already there.
+
+### USB serial (secondary: setup, recovery, export)
+
+`usbd-serial` (USB CDC-ACM) presents as `/dev/ttyACM0` (Linux/macOS) or a
+COM port (Windows) when plugged in — no host driver needed on any current
+OS. A small line-buffered command set for the things that genuinely need
+a real keyboard or need to move a lot of text:
+
+```
+jama> quickadd "Coffee" from=assets:checking to=expenses:cafe
+added quick-account "Coffee"
+jama> settime 2026-09-23T10:00:00
 jama> export
-...streams the full ledger as JAMA text-format lines...
+...streams the full ledger as JAMA text-format lines, for the host
+     terminal to capture (e.g. `picocom --logfile ledger.beancount`)...
 ```
 
-A few deliberate departures from the desktop CLI's grammar, not
-oversights:
-
-- `from=`/`to=` key=value tokens instead of `--from`/`--to` GNU-style
-  flags — a full flag parser is unnecessary code size for a small fixed
-  grammar typed over a raw serial line; a simple positional +
-  `key=value` tokenizer is enough and still legible.
-- No colour, no Unicode box-drawing — most terminal programs a user
-  would attach with (`screen`, `minicom`, `picocom`, PuTTY) render plain
-  ANSI fine if ever wanted later, but it isn't load-bearing for v0.
-- Echo, backspace, and a bounded line length (e.g. 128 bytes) need to be
-  handled explicitly — a raw serial port doesn't locally echo the way a
-  real terminal does.
-
-**Open question #3** (§13): is a USB-tethered serial console the right
-interaction model, or is the actual goal a standalone appliance (physical
-buttons + a small display, no host PC needed)? The latter is a
-substantially larger scope — button debouncing, on-device text entry
-without a keyboard, a display driver — and isn't assumed here without
-confirmation.
+No colour, no Unicode box-drawing on this channel — plain ASCII is
+sufficient for an occasional setup/export session, and keeping it simple
+saves flash. **Open question #7** (§13): should the day-to-day `add`
+flow ever be reachable over USB serial too (e.g. for someone who'd rather
+type at a desk sometimes), or is button-only intentional?
 
 ## 7. Time
 
 Neither RP2040 nor RP2350 has a **battery-backed** real-time clock: the
 chip's RTC peripheral free-runs from whatever it was last set to, but its
-counter resets like everything else on power loss, because the Pico
-boards have no onboard coin-cell or supercap backup circuit. v0's honest
-answer: the host sets the time once per USB session
-(`jama> settime 2026-09-22T10:00:00`) using the connecting computer's own
-clock; the on-chip RTC free-runs correctly for the rest of that session.
-Unplugged and running standalone (e.g. off a power bank), time is
-unknown after the first boot until set again. An external I2C RTC module
-(DS3231 or similar, battery-backed, ~$2–5) is the real fix and a natural
-Phase 4 hardware addition — flagged here, not silently assumed away.
+counter resets like everything else on power loss (no onboard coin-cell
+or supercap backup). This matters more now than it did for a
+USB-tethered design: a handheld device is *supposed* to be used away from
+any host, so "the host sets the time each session" doesn't hold — between
+charges, the device may never see a host at all.
+
+Two honest options, not one assumed answer:
+
+1. **v0 minimum**: `settime` over USB serial whenever it happens to be
+   plugged in to charge; the on-chip RTC free-runs from there until the
+   next power loss (a dead battery, a hard reset). Dates recorded while
+   genuinely "wrong" (long unplugged) would need manual correction later
+   — acceptable for a first cut, not for daily reliance.
+2. **Recommended given standalone use is now primary**: add a
+   battery-backed external I2C RTC module (DS3231 or similar, ~$2–5,
+   its own coin-cell) so accurate dates survive the main battery being
+   fully drained or swapped. This moves from "Phase 4 nice-to-have" (its
+   status in the USB-tethered draft of this doc) to "worth doing in
+   Phase 1" now that the device has no host to fall back on.
+
+**Open question #8** (§13): is the extra RTC module an acceptable
+addition to the bill of materials, or should v0 ship with the
+host-sets-time limitation and accept its consequences?
 
 ## 8. Command surface for v0
 
-| Command | v0 | Why |
-|---|---|---|
-| `add` | ✅ | Core loop |
-| `list N` | ✅ | Core loop |
-| `balance [account]` | ✅ (single account or a small fixed set tracked at once — see below) | Core loop |
-| `check` | ✅ | Cheap, high-value: catches an imbalance before it's trusted |
-| `export`/`dump` | ✅ | The plain-text promise, streamed over serial (§4) |
-| `import` | ❌ | No path to get a CSV onto a bare Pico without SD + a file-transfer story of its own |
-| `register` | ❌ (later) | Needs the same streaming-account-history machinery as `balance --full`; not v0-critical |
-| `networth` | ❌ (later) | Same reason |
-| `edit` | ❌ | No `$EDITOR` on a microcontroller |
-| `--json` | ❌ | No real consumer on a raw serial console |
-| colour | ❌ (later, low priority) | Not load-bearing |
+| Feature | Where | v0 | Why |
+|---|---|---|---|
+| Add a transaction | Button menu | ✅ | Core loop (§6) |
+| Recent transactions list | Button menu | ✅ | Core loop |
+| Balance (per quick-account) | Button menu | ✅ (the quick-account list, §5 — not an arbitrary pattern) | Core loop |
+| Check | Button menu | ✅ | Cheap, high-value: catches an imbalance before it's trusted |
+| Export (stream full ledger text) | USB serial | ✅ | The plain-text promise (§4) |
+| Add/edit a quick-account | USB serial | ✅ | Needs real text entry — a one-time setup action, not per-transaction (§5/§6) |
+| Set time | USB serial | ✅ (v0 minimum, §7) | No host to fall back on otherwise |
+| Import a CSV | — | ❌ | No path onto a handheld with no host tethering during normal use |
+| Full free-text narration | — | ❌ (later) | Same "no realistic on-device typing" problem as account names (§5) |
+| `register`/`networth` | — | ❌ (later) | Needs streaming-account-history machinery beyond v0's quick-account balances |
+| `edit` an existing transaction | — | ❌ | No `$EDITOR`, and no realistic on-device text re-entry either |
+| Colour, JSON | — | ❌ | No terminal to render colour into; no scripting consumer for JSON on a handheld |
 
-A full-tree `balance` (every account, like the desktop's `jama balance`
-with no pattern) needs an accumulator sized to the number of distinct
-accounts touched, which isn't bounded at compile time the way a single
-account's running total is — v0 should probably cap it (e.g. track up to
-32 distinct accounts in one `balance` call, erroring clearly past that)
-rather than assume unbounded RAM for the accumulator.
+Because `balance` on-device only ever covers the fixed quick-account list
+(§5, capped at 16 in the sketch above), its accumulator size is known at
+compile time — no unbounded-RAM concern the way an arbitrary full-tree
+`balance` would have. A true full-tree balance over every account that's
+ever appeared (like desktop's `jama balance` with no pattern) stays a
+later feature, reachable via `export` + the desktop companion tool (§10)
+in the meantime.
 
 ## 9. Verification limits — what I can and can't check from here
 
@@ -311,7 +418,7 @@ made on your behalf:
    to do and hard to walk back cleanly — worth a explicit yes before I
    do it, not an inference from "the Pico is the real target."
 
-**Open question #4** (§13).
+**Open question #2** (§13).
 
 ## 11. Risk register
 
@@ -322,37 +429,52 @@ made on your behalf:
 | RAM exhaustion from unbounded input | `heapless` fixed-capacity buffers everywhere; loud, explicit rejection at the limit, never silent truncation |
 | USB enumeration quirks on some hosts | CDC-ACM is a standard, driverless device class on current OSes; still needs real cross-OS testing once hardware exists |
 | SD card absent, wrong format, or removed mid-write | Mount-check on boot with a clear serial error; never assume presence |
+| Battery drains faster than expected (RP2040's best sleep current is ~180 µA, not the sub-µA figures a purpose-built low-power MCU reaches — §2a) | Set the expectation up front (charge every few days to ~two weeks, not months); use dormant/sleep mode between button presses; e-ink (if chosen) draws power only during a refresh |
+| Time drifts or resets after the battery fully drains, with no host nearby to `settime` | External battery-backed RTC module (§7) if Q8 confirms it's worth the extra part; otherwise a documented, accepted limitation |
 | **Silent data loss** | The one failure mode worse than any of the above for a financial record. Every choice here — loud errors over guesses, full-record-before-write, explicit caps — follows the same principle as the earlier fix that stopped `jama add` from silently assuming SAR: fail loudly, never assume. |
 
 ## 12. Suggested implementation phases
 
 0. Toolchain bring-up: blink an LED, confirm `cargo build` → flash →
    run works end to end on your actual hardware.
-1. USB CDC serial REPL that echoes input, no ledger logic — confirms
-   the interaction model on a real host OS before building on top of it.
-2. Onboard-flash log backend + `add`/`list`/`balance`/`check`/`export`.
-3. *(if Q2 confirms SD hardware)* SD-card plain-text backend behind the
+1. Display + button bring-up: render a static menu, react to button
+   presses, no ledger logic yet — confirms the *primary* interaction
+   model (not USB serial) works on real hardware before anything is
+   built on top of it. USB serial's minimal `settime`/`export` shell can
+   come up in parallel since it shares little with the display code.
+2. Onboard-flash log backend + the Add/Balance/Check menu flow (§6, §8).
+3. Quick-account add/edit over USB serial (§5/§6).
+4. *(if Q4 confirms SD hardware)* SD-card plain-text backend behind the
    same `LedgerStore` trait.
-4. *(if wanted)* External RTC module integration.
-5. *(if Q3 confirms standalone appliance)* Physical buttons + small
-   display, replacing or supplementing the serial console.
+5. *(if Q8 confirms it)* External RTC module integration.
+6. Power management: dormant/sleep between button presses, wake-on-press,
+   real battery-life measurement against §2a's expectations.
 
 ## 13. Open questions before any code gets written
 
 1. **Board**: RP2040 (original Pico) or RP2350 (Pico 2)? Sets the target
    triple and the RAM/flash budget in §2.
-2. **SD card**: part of the actual hardware plan, or bare-Pico-only? Decides
-   whether Phase 1's flash-log approach (§4) is a stepping stone or the
-   permanent answer.
-3. **Interaction model**: USB-tethered serial console (assumed above), or
-   a standalone appliance with physical buttons + a display (§6, much
-   larger scope)?
-4. **The existing desktop build** (§10): companion tool, kept-but-frozen,
+2. **The existing desktop build** (§10): companion tool, kept-but-frozen,
    or removed?
-5. **Debug probe**: do you have (or plan to get) a `probe-rs`-compatible
+3. **Debug probe**: do you have (or plan to get) a `probe-rs`-compatible
    debug probe — a second Pico running `debugprobe` firmware works — or
    is iteration BOOTSEL-drag-and-drop only? Affects how smooth the actual
    bring-up loop will be, not the design itself.
+4. **SD card**: part of the actual hardware plan, or onboard-flash-only?
+   Decides whether Phase 2's flash-log approach (§4) is a stepping stone
+   or the permanent answer.
+5. ~~Interaction model~~ — **resolved**: standalone, buttons + display
+   (§6).
+6. **Reference board** (§2a): Badger 2040 (integrated, e-ink, sips power,
+   slower to navigate) or Pico + Pico Display Pack (two-part, colour LCD,
+   snappier, thirstier)? Or a different board/custom PCB entirely? This
+   is as much a feel decision as an engineering one.
+7. **USB-serial `add`** (§6): button-only by design, or should the same
+   `add` flow also be reachable by typing over USB serial for someone at
+   a desk?
+8. **RTC module** (§7): worth the extra ~$2–5 part and I2C wiring for
+   accurate standalone timekeeping, or accept the host-sets-time
+   limitation for v0?
 
 Once these are answered, §12's phases are the concrete plan to start
 building against.
